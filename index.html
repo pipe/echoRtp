@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>RtpTransport echo</title>
+</head>
+<body>
+<h1>RtpTransport echo</h1>
+<p>
+    This test takes video from a camera
+    sends it over a peer connection to a peer.
+    The peer forwards copies of the video (without re-encoding it) to a second peer.
+</p>
+<table>
+    <tr><th>Source</th><th>Local peer</th><th>Copy</th></tr>
+    <tr>
+        <td><video id="source" autoplay="true"></video></td>
+        <td><video id="sink" autoplay="true"></video></td>
+        <td><video id="copy" autoplay="true"></video></td>
+    </tr>
+</table>
+</body>
+<script>
+    var cam;
+    var toDupe;
+    const pcConfig = {
+        "iceServers": [
+            {"urls": "stun:stun4.l.google.com:19302"}
+        ],
+        "bundlePolicy": "max-bundle", "iceCandidatePoolSize": 2
+    };
+    function sortByMimeTypes(codecs, preferredOrder) {
+        return codecs.sort((a, b) => {
+            const indexA = preferredOrder.indexOf(a.mimeType);
+            const indexB = preferredOrder.indexOf(b.mimeType);
+            const orderA = indexA >= 0 ? indexA : Number.MAX_VALUE;
+            const orderB = indexB >= 0 ? indexB : Number.MAX_VALUE;
+            return orderA - orderB;
+        });
+    }
+    function setCodecs(peerConnection){
+        // Get supported codecs the sort using preferred codecs
+        const supportedCodecs = RTCRtpReceiver.getCapabilities("video").codecs;
+        const preferredCodecs = ["video/H264", "video/VP8", "video/VP9"];
+        const sortedCodecs = sortByMimeTypes(supportedCodecs, preferredCodecs);
+
+// Get transceiver for connection and set the preferences
+        const [transceiver] = peerConnection.getTransceivers();
+        transceiver.setCodecPreferences(sortedCodecs); // <---
+    }
+    async function loaded() {
+        cam = await navigator.mediaDevices.getUserMedia({video: {width: 640, height: 480}});
+        document.getElementById("source").srcObject = cam;
+
+        const sourcepc = new RTCPeerConnection(pcConfig);
+        sourcepc.addTrack(cam.getVideoTracks()[0]);
+        const offer = await sourcepc.createOffer();
+        await sourcepc.setLocalDescription(offer);
+
+        const sinkpc = new RTCPeerConnection(pcConfig);
+        sinkpc.ontrack = (e) => {
+            if (e.track.kind == 'video') {
+                console.log("got new video stream");
+                //toDupe = e.track;
+                document.getElementById("sink").srcObject = new MediaStream([e.track]);
+                const es = e.receiver.createEncodedStreams();
+                recvFrames(es);
+            }
+        }
+        sourcepc.onicecandidate = (e) => {
+            sinkpc.addIceCandidate(e.candidate)
+        }
+        sinkpc.onicecandidate = (e) => {
+            sourcepc.addIceCandidate(e.candidate)
+        }
+        await sinkpc.setRemoteDescription(offer);
+        setCodecs(sinkpc);
+        const answer = await sinkpc.createAnswer()
+        await sinkpc.setLocalDescription(answer);
+        await sourcepc.setRemoteDescription(answer);
+        await doCopy();
+    }
+
+    var copywriter = null;
+    var whipOptions = {};
+    function setWhipOptions(t) {
+        console.log("prune codecs to just ours.")
+        let paras = t.sender.getParameters();
+        let codecs = paras.codecs;
+        codecs.forEach((codec)=> {
+            console.log(codec.mimeType);
+        })
+        var wcodec = codecs.find((codec) => codec.mimeType.toUpperCase().includes("H264"));
+        whipOptions.payloadType = wcodec.payloadType;
+    }
+    async function recvFrames(es){
+        const reader = es.readable.getReader();
+        const writer = es.writable.getWriter();
+        while (true) {
+            const {value: frame, done} = await reader.read();
+            if (done) return;
+            var dframe = new RTCEncodedVideoFrame(frame,whipOptions);
+            await writer.write(frame);
+
+            //console.log("frame");
+            if (copywriter){
+                copywriter.write(dframe);
+                //console.log("whipframe");
+            }
+        }
+    }
+    async function doCopy(){
+        const sourcepc2 = new RTCPeerConnection(pcConfig);
+
+        let t = sourcepc2.addTransceiver("video", {
+            'direction': 'sendonly'
+        });
+        console.log("bypass reencode step");
+        copywriter = t.sender.createEncodedStreams().writable.getWriter();
+        //sourcepc2.addTrack(toDupe);
+        const offer2 = await sourcepc2.createOffer();
+        await sourcepc2.setLocalDescription(offer2);
+        const sinkpc2 = new RTCPeerConnection(pcConfig);
+        sinkpc2.ontrack =  (e)=> {
+            if (e.track.kind == 'video') {
+                console.log("got copy video stream");
+                document.getElementById("copy").srcObject = new MediaStream([e.track]);
+            }
+        }
+        sourcepc2.onicecandidate = (e) => {
+            sinkpc2.addIceCandidate(e.candidate)
+        }
+        sinkpc2.onicecandidate = (e) => {
+            sourcepc2.addIceCandidate(e.candidate)
+        }
+        await sinkpc2.setRemoteDescription(offer2);
+        setCodecs(sinkpc2);
+        const answer2 = await sinkpc2.createAnswer()
+        await sinkpc2.setLocalDescription(answer2);
+        await sourcepc2.setRemoteDescription(answer2);
+    }
+    document.addEventListener('DOMContentLoaded', loaded);
+
+</script>
+</html>
