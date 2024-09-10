@@ -3,6 +3,202 @@
 <head>
     <meta charset="UTF-8">
     <title>RtpTransport echo</title>
+    <script type="module">
+        import {WHIPClient} from "./whip.js"
+
+        let cam;
+        const pcConfig = {
+            "iceServers": [
+                {"urls": "stun:stun4.l.google.com:19302"}
+            ],
+            "bundlePolicy": "max-bundle", "iceCandidatePoolSize": 2
+        };
+        function sortByMimeTypes(codecs, preferredOrder) {
+            return codecs.sort((a, b) => {
+                const indexA = preferredOrder.indexOf(a.mimeType);
+                const indexB = preferredOrder.indexOf(b.mimeType);
+                const orderA = indexA >= 0 ? indexA : Number.MAX_VALUE;
+                const orderB = indexB >= 0 ? indexB : Number.MAX_VALUE;
+                return orderA - orderB;
+            });
+        }
+        function setCodecs(peerConnection){
+            // Get supported codecs the sort using preferred codecs
+            const supportedCodecs = RTCRtpReceiver.getCapabilities("video").codecs;
+            const preferredCodecs = ["video/H264", "video/VP8", "video/VP9"];
+            const sortedCodecs = sortByMimeTypes(supportedCodecs, preferredCodecs);
+
+// Get transceiver for connection and set the preferences
+            const [transceiver] = peerConnection.getTransceivers();
+            transceiver.setCodecPreferences(sortedCodecs); // <---
+        }
+
+        var whipSettings;
+        function loadSettings(){
+            whipSettings = (localStorage.whipSettings) ?JSON.parse(localStorage.whipSettings):null;
+            if (whipSettings) {
+                document.getElementById("whipURL").value = whipSettings.whipURL;
+                document.getElementById("whipToken").value = whipSettings.token;
+                document.getElementById("viewURL").value = whipSettings.viewURL;
+            }
+        }
+        function saveSettings(){
+            var whipURL = document.getElementById("whipURL").value;
+            var token = document.getElementById("whipToken").value;
+            var viewURL = document.getElementById("viewURL").value;
+
+            whipSettings = { whipURL: whipURL , token:token , viewURL:viewURL };
+            localStorage.whipSettings = JSON.stringify(whipSettings);
+        }
+
+        async function loaded() {
+            console.log("loading");
+
+            const castb = document.getElementById("cast");
+            castb.addEventListener("click", castMe)
+            loadSettings();
+            cam = await navigator.mediaDevices.getUserMedia({video: {width: 640, height: 480}});
+            document.getElementById("source").srcObject = cam;
+
+            const sourcepc = new RTCPeerConnection(pcConfig);
+            sourcepc.addTrack(cam.getVideoTracks()[0]);
+            const offer = await sourcepc.createOffer();
+            await sourcepc.setLocalDescription(offer);
+
+            const sinkpc = new RTCPeerConnection(pcConfig);
+            sinkpc.ontrack = (e) => {
+                if (e.track.kind == 'video') {
+
+                    console.log("got new video stream");
+                    //toDupe = e.track;
+                    document.getElementById("sink").srcObject = new MediaStream([e.track]);
+                    const es = e.receiver.createEncodedStreams();
+                    recvFrames(es);
+                }
+            }
+            sourcepc.onicecandidate = (e) => {
+                sinkpc.addIceCandidate(e.candidate)
+            }
+            sinkpc.onicecandidate = (e) => {
+                sourcepc.addIceCandidate(e.candidate)
+            }
+            await sinkpc.setRemoteDescription(offer);
+            setCodecs(sinkpc);
+            const answer = await sinkpc.createAnswer()
+            await sinkpc.setLocalDescription(answer);
+            await sourcepc.setRemoteDescription(answer);
+            //await doCopy();
+        }
+
+        var copywriter = null;
+        var whipOptions = {};
+        function setWhipOptions(t) {
+            console.log("prune codecs to just ours.")
+            let paras = t.sender.getParameters();
+            let codecs = paras.codecs;
+            codecs.forEach((codec)=> {
+                console.log(codec.mimeType);
+            })
+            var wcodec = codecs.find((codec) => codec.mimeType.toUpperCase().includes("H264"));
+            whipOptions.payloadType = wcodec.payloadType;
+        }
+        async function recvFrames(es){
+            const reader = es.readable.getReader();
+            const writer = es.writable.getWriter();
+            while (true) {
+                const {value: frame, done} = await reader.read();
+                if (done) return;
+                var dframe = new RTCEncodedVideoFrame(frame,whipOptions);
+                await writer.write(frame);
+
+                //console.log("frame");
+                if (copywriter){
+                    copywriter.write(dframe);
+                    //console.log("whipframe");
+                }
+            }
+        }
+
+        var streaming = false;
+        var whip = null;
+        async function castMe() {
+            saveSettings();
+            if (whipSettings) {
+                var whipURL = whipSettings.whipURL;
+                var viewURL = whipSettings.viewURL;
+                var whiptoken = whipSettings.token;
+                var castb = document.getElementById("cast");
+                if (!streaming) {
+                    console.log("starting publish stream ");
+                    //Get mic+cam
+
+                    const pc = new RTCPeerConnection(pcConfig);
+                    let t = pc.addTransceiver("video", {
+                        'direction': 'sendonly'
+                    });
+                    console.log("bypass reencode step");
+                    let enc =  t.sender.createEncodedStreams()
+                    copywriter = enc.writable.getWriter();
+                    //Send all tracks
+
+
+                    //Create whip client
+                    whip = new WHIPClient();
+
+                    //Start publishing
+                    whip.publish(pc, whipURL, whiptoken)
+                        .then(() => {
+                            streaming = true;
+                            console.log("Broadcast has begun.");
+                            castb.innerText = "Stop Casting";
+                            var icopy = document.getElementById("copy");
+                            icopy.src = viewURL;
+                        })
+                        .catch((e) => {
+                            console.error("Failed to begin broadcast: ", e);
+                        });
+                } else {
+                    console.log("stop publishing stream ");
+                    whip.stop();
+                    streaming = false;
+                    castb.innerText = "Restart Casting";
+                }
+            }
+        }
+        async function doCopy(){
+            const sourcepc2 = new RTCPeerConnection(pcConfig);
+
+            let t = sourcepc2.addTransceiver("video", {
+                'direction': 'sendonly'
+            });
+            console.log("bypass reencode step");
+            copywriter = t.sender.createEncodedStreams().writable.getWriter();
+            //sourcepc2.addTrack(toDupe);
+            const offer2 = await sourcepc2.createOffer();
+            await sourcepc2.setLocalDescription(offer2);
+            const sinkpc2 = new RTCPeerConnection(pcConfig);
+            sinkpc2.ontrack =  (e)=> {
+                if (e.track.kind == 'video') {
+                    console.log("got copy video stream");
+                    document.getElementById("copy").srcObject = new MediaStream([e.track]);
+                }
+            }
+            sourcepc2.onicecandidate = (e) => {
+                sinkpc2.addIceCandidate(e.candidate)
+            }
+            sinkpc2.onicecandidate = (e) => {
+                sourcepc2.addIceCandidate(e.candidate)
+            }
+            await sinkpc2.setRemoteDescription(offer2);
+            setCodecs(sinkpc2);
+            const answer2 = await sinkpc2.createAnswer()
+            await sinkpc2.setLocalDescription(answer2);
+            await sourcepc2.setRemoteDescription(answer2);
+        }
+        console.log("started");
+        document.addEventListener('DOMContentLoaded', loaded);
+
+    </script>
 </head>
 <body>
 <h1>RtpTransport echo</h1>
@@ -11,135 +207,29 @@
     sends it over a peer connection to a peer.
     The peer forwards copies of the video (without re-encoding it) to a second peer.
 </p>
+<div>
+    <div class="form-group">
+        <label for="whipURL">WHIP URL</label>
+        <input type="url" class="form-control" id="whipURL">
+    </div>
+    <div class="form-group">
+        <label for="whipToken">WHIP Token </label>
+        <input type="text" class="form-control" id="whipToken" >
+    </div>
+    <div class="form-group">
+        <label for="viewURL">View URL</label>
+        <input type="url" class="form-control" id="viewURL">
+    </div>
+    </form>
+    <button id="cast" type="button">cast</button>
+</div>
 <table>
     <tr><th>Source</th><th>Local peer</th><th>Copy</th></tr>
     <tr>
         <td><video id="source" autoplay="true"></video></td>
         <td><video id="sink" autoplay="true"></video></td>
-        <td><video id="copy" autoplay="true"></video></td>
+        <td><iframe width="640" height="480" id="copy"/></td>
     </tr>
 </table>
 </body>
-<script>
-    var cam;
-    var toDupe;
-    const pcConfig = {
-        "iceServers": [
-            {"urls": "stun:stun4.l.google.com:19302"}
-        ],
-        "bundlePolicy": "max-bundle", "iceCandidatePoolSize": 2
-    };
-    function sortByMimeTypes(codecs, preferredOrder) {
-        return codecs.sort((a, b) => {
-            const indexA = preferredOrder.indexOf(a.mimeType);
-            const indexB = preferredOrder.indexOf(b.mimeType);
-            const orderA = indexA >= 0 ? indexA : Number.MAX_VALUE;
-            const orderB = indexB >= 0 ? indexB : Number.MAX_VALUE;
-            return orderA - orderB;
-        });
-    }
-    function setCodecs(peerConnection){
-        // Get supported codecs the sort using preferred codecs
-        const supportedCodecs = RTCRtpReceiver.getCapabilities("video").codecs;
-        const preferredCodecs = ["video/H264", "video/VP8", "video/VP9"];
-        const sortedCodecs = sortByMimeTypes(supportedCodecs, preferredCodecs);
-
-// Get transceiver for connection and set the preferences
-        const [transceiver] = peerConnection.getTransceivers();
-        transceiver.setCodecPreferences(sortedCodecs); // <---
-    }
-    async function loaded() {
-        cam = await navigator.mediaDevices.getUserMedia({video: {width: 640, height: 480}});
-        document.getElementById("source").srcObject = cam;
-
-        const sourcepc = new RTCPeerConnection(pcConfig);
-        sourcepc.addTrack(cam.getVideoTracks()[0]);
-        const offer = await sourcepc.createOffer();
-        await sourcepc.setLocalDescription(offer);
-
-        const sinkpc = new RTCPeerConnection(pcConfig);
-        sinkpc.ontrack = (e) => {
-            if (e.track.kind == 'video') {
-                console.log("got new video stream");
-                //toDupe = e.track;
-                document.getElementById("sink").srcObject = new MediaStream([e.track]);
-                const es = e.receiver.createEncodedStreams();
-                recvFrames(es);
-            }
-        }
-        sourcepc.onicecandidate = (e) => {
-            sinkpc.addIceCandidate(e.candidate)
-        }
-        sinkpc.onicecandidate = (e) => {
-            sourcepc.addIceCandidate(e.candidate)
-        }
-        await sinkpc.setRemoteDescription(offer);
-        setCodecs(sinkpc);
-        const answer = await sinkpc.createAnswer()
-        await sinkpc.setLocalDescription(answer);
-        await sourcepc.setRemoteDescription(answer);
-        await doCopy();
-    }
-
-    var copywriter = null;
-    var whipOptions = {};
-    function setWhipOptions(t) {
-        console.log("prune codecs to just ours.")
-        let paras = t.sender.getParameters();
-        let codecs = paras.codecs;
-        codecs.forEach((codec)=> {
-            console.log(codec.mimeType);
-        })
-        var wcodec = codecs.find((codec) => codec.mimeType.toUpperCase().includes("H264"));
-        whipOptions.payloadType = wcodec.payloadType;
-    }
-    async function recvFrames(es){
-        const reader = es.readable.getReader();
-        const writer = es.writable.getWriter();
-        while (true) {
-            const {value: frame, done} = await reader.read();
-            if (done) return;
-            var dframe = new RTCEncodedVideoFrame(frame,whipOptions);
-            await writer.write(frame);
-
-            //console.log("frame");
-            if (copywriter){
-                copywriter.write(dframe);
-                //console.log("whipframe");
-            }
-        }
-    }
-    async function doCopy(){
-        const sourcepc2 = new RTCPeerConnection(pcConfig);
-
-        let t = sourcepc2.addTransceiver("video", {
-            'direction': 'sendonly'
-        });
-        console.log("bypass reencode step");
-        copywriter = t.sender.createEncodedStreams().writable.getWriter();
-        //sourcepc2.addTrack(toDupe);
-        const offer2 = await sourcepc2.createOffer();
-        await sourcepc2.setLocalDescription(offer2);
-        const sinkpc2 = new RTCPeerConnection(pcConfig);
-        sinkpc2.ontrack =  (e)=> {
-            if (e.track.kind == 'video') {
-                console.log("got copy video stream");
-                document.getElementById("copy").srcObject = new MediaStream([e.track]);
-            }
-        }
-        sourcepc2.onicecandidate = (e) => {
-            sinkpc2.addIceCandidate(e.candidate)
-        }
-        sinkpc2.onicecandidate = (e) => {
-            sourcepc2.addIceCandidate(e.candidate)
-        }
-        await sinkpc2.setRemoteDescription(offer2);
-        setCodecs(sinkpc2);
-        const answer2 = await sinkpc2.createAnswer()
-        await sinkpc2.setLocalDescription(answer2);
-        await sourcepc2.setRemoteDescription(answer2);
-    }
-    document.addEventListener('DOMContentLoaded', loaded);
-
-</script>
 </html>
