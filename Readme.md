@@ -5,3 +5,6 @@ Uses a browser to show incoming video and forward it to a whip server without re
 In future it may require you to start your (chrome canary) browser like this
 
 ./Google Chrome Canary --force-fieldtrials=WebRTC-Bwe-InjectedCongestionController/Enabled --enable-blink-features=RTCRtpTransport
+
+try it here:
+https://pipe.github.io/echoRtp/
