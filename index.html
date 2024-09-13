@@ -51,6 +51,7 @@
             localStorage.whipSettings = JSON.stringify(whipSettings);
         }
 
+        let worker = null;
         async function loaded() {
             console.log("loading");
 
@@ -68,12 +69,19 @@
             const sinkpc = new RTCPeerConnection(pcConfig);
             sinkpc.ontrack = (e) => {
                 if (e.track.kind == 'video') {
-
                     console.log("got new video stream");
                     //toDupe = e.track;
                     document.getElementById("sink").srcObject = new MediaStream([e.track]);
-                    const es = e.receiver.createEncodedStreams();
-                    recvFrames(es);
+                    if (e.receiver.createEncodedStreams) {
+                        // chrome
+                        const es = e.receiver.createEncodedStreams();
+                        recvFrames(es);
+                    } else {
+                        worker = new Worker("recv.js");
+                        e.receiver.transform = new RTCRtpScriptTransform(worker, {
+                            name: "recvTransform"
+                        });
+                    }
                 }
             }
             sourcepc.onicecandidate = (e) => {
@@ -137,8 +145,13 @@
                         'direction': 'sendonly'
                     });
                     console.log("bypass reencode step");
-                    let enc =  t.sender.createEncodedStreams()
-                    copywriter = enc.writable.getWriter();
+                    if (t.sender.createEncodedStreams) {
+                        let enc = t.sender.createEncodedStreams()
+                        copywriter = enc.writable.getWriter();
+                    }  else {
+                        t.sender.transform = new RTCRtpScriptTransform(worker, {
+                        name: "sendTransform"});
+                    }
                     //Send all tracks
 
 
