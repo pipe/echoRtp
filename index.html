@@ -72,7 +72,10 @@
                     console.log("got new video stream");
                     //toDupe = e.track;
                     document.getElementById("sink").srcObject = new MediaStream([e.track]);
-                    if (e.receiver.createEncodedStreams) {
+                    if (('rtpTransport' in RTCPeerConnection.prototype && 'createProcessor' in RTCRtpTransport.prototype)){
+                        worker = new Worker("rtpworker.js");
+                        sinkpc.rtpTransport.createProcessor(worker);
+                    } else if (e.receiver.createEncodedStreams) {
                         // chrome
                         const es = e.receiver.createEncodedStreams();
                         recvFrames(es);
